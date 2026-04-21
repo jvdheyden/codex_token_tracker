@@ -1,0 +1,37 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  filter/codex_usage_logs:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'attributes["event.name"] != "codex.sse_event"'
+        - 'attributes["event.kind"] != "response.completed"'
+  filter/drop_traces:
+    error_mode: ignore
+    traces:
+      span:
+        - 'true'
+
+exporters:
+  file/codex:
+    path: /data/codex-otel.jsonl
+    format: json
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [filter/drop_traces]
+      exporters: [file/codex]
+    logs:
+      receivers: [otlp]
+      processors: [filter/codex_usage_logs]
+      exporters: [file/codex]
