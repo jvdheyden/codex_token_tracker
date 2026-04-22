@@ -81,6 +81,7 @@ REASONING_TOKEN_KEYS = (
     "reasoning_tokens",
 )
 TOKEN_KEYS = INPUT_TOKEN_KEYS + CACHED_TOKEN_KEYS + OUTPUT_TOKEN_KEYS + REASONING_TOKEN_KEYS
+CONVERSATION_KEYS = ("conversation.id", "conversation_id")
 NANO_TIME_KEYS = ("timeUnixNano", "observedTimeUnixNano", "time_unix_nano")
 MILLI_TIME_KEYS = ("timeUnixMilli", "timestamp_ms", "created_ms")
 ISO_TIME_KEYS = ("timestamp", "time", "created_at", "createdAt")
@@ -89,6 +90,7 @@ ISO_TIME_KEYS = ("timestamp", "time", "created_at", "createdAt")
 @dataclass
 class UsageEvent:
     day: str
+    conversation_id: str
     model: str
     input_tokens: int
     cached_input_tokens: int
@@ -374,8 +376,10 @@ def parse_iso_time(value: Any) -> datetime | None:
 def extract_usage(record: dict[str, Any], root: dict[str, Any]) -> UsageEvent:
     flat = flatten(record)
     model = str(first_value(flat, MODEL_KEYS) or "unknown").strip() or "unknown"
+    conversation_id = str(first_value(flat, CONVERSATION_KEYS) or "unknown").strip() or "unknown"
     return UsageEvent(
         day=event_day(record, root),
+        conversation_id=conversation_id,
         model=model,
         input_tokens=as_int(first_value(flat, INPUT_TOKEN_KEYS)),
         cached_input_tokens=as_int(first_value(flat, CACHED_TOKEN_KEYS)),
@@ -427,17 +431,17 @@ def estimate_cost(model: str, input_tokens: int, cached_input_tokens: int, outpu
     ) / 1_000_000
 
 
-def summarize(events: Iterable[UsageEvent], since: str | None, today: bool) -> dict[tuple[str, str], Summary]:
+def summarize(events: Iterable[UsageEvent], since: str | None, today: bool) -> dict[tuple[str, str, str], Summary]:
     since_date = datetime.now().astimezone().date().isoformat() if today else since
-    summaries: dict[tuple[str, str], Summary] = defaultdict(Summary)
+    summaries: dict[tuple[str, str, str], Summary] = defaultdict(Summary)
     for event in events:
         if since_date and (event.day == "unknown" or event.day < since_date):
             continue
-        summaries[(event.day, event.model)].add(event)
+        summaries[(event.day, event.conversation_id, event.model)].add(event)
     return summaries
 
 
-def print_text(path: Path, rows: dict[tuple[str, str], Summary], range_label: str) -> None:
+def print_text(path: Path, rows: dict[tuple[str, str, str], Summary], range_label: str) -> None:
     print("Codex token tracker summary")
     print(f"Input: {path}")
     print(f"Range: {range_label}")
@@ -447,12 +451,12 @@ def print_text(path: Path, rows: dict[tuple[str, str], Summary], range_label: st
         return
 
     print(
-        f"{'Day':<10}  {'Model':<18} {'Req':>5} {'Input':>11} {'Cached':>11} "
+        f"{'Day':<10}  {'Conversation':<36}  {'Model':<18} {'Req':>5} {'Input':>11} {'Cached':>11} "
         f"{'Total In':>11} {'Output':>11} {'Reasoning':>11} {'Est USD':>12}"
     )
     total = Summary()
     missing_models: set[str] = set()
-    for (day, model), row in sorted(rows.items()):
+    for (day, conversation_id, model), row in sorted(rows.items()):
         total.requests += row.requests
         total.input_tokens += row.input_tokens
         total.cached_input_tokens += row.cached_input_tokens
@@ -464,14 +468,14 @@ def print_text(path: Path, rows: dict[tuple[str, str], Summary], range_label: st
         cost_text = "n/a" if row.missing_price else f"{row.estimated_usd:.4f}"
         uncached_input = max(0, row.input_tokens - row.cached_input_tokens)
         print(
-            f"{day:<10}  {model:<18.18} {row.requests:>5} {uncached_input:>11} "
+            f"{day:<10}  {conversation_id:<36}  {model:<18.18} {row.requests:>5} {uncached_input:>11} "
             f"{row.cached_input_tokens:>11} {row.input_tokens:>11} {row.output_tokens:>11} "
             f"{row.reasoning_tokens:>11} {cost_text:>12}"
         )
     total_cost_text = "n/a" if missing_models and total.estimated_usd == 0 else f"{total.estimated_usd:.4f}"
     total_uncached_input = max(0, total.input_tokens - total.cached_input_tokens)
     print(
-        f"{'TOTAL':<10}  {'':<18} {total.requests:>5} {total_uncached_input:>11} "
+        f"{'TOTAL':<10}  {'':<36}  {'':<18} {total.requests:>5} {total_uncached_input:>11} "
         f"{total.cached_input_tokens:>11} {total.input_tokens:>11} {total.output_tokens:>11} "
         f"{total.reasoning_tokens:>11} {total_cost_text:>12}"
     )
@@ -480,11 +484,12 @@ def print_text(path: Path, rows: dict[tuple[str, str], Summary], range_label: st
         print("Missing pricing for: " + ", ".join(sorted(missing_models)))
 
 
-def print_csv(rows: dict[tuple[str, str], Summary]) -> None:
+def print_csv(rows: dict[tuple[str, str, str], Summary]) -> None:
     writer = csv.writer(sys.stdout)
     writer.writerow(
         [
             "day",
+            "conversation_id",
             "model",
             "requests",
             "input_tokens",
@@ -496,11 +501,12 @@ def print_csv(rows: dict[tuple[str, str], Summary]) -> None:
             "pricing_status",
         ]
     )
-    for (day, model), row in sorted(rows.items()):
+    for (day, conversation_id, model), row in sorted(rows.items()):
         uncached_input = max(0, row.input_tokens - row.cached_input_tokens)
         writer.writerow(
             [
                 day,
+                conversation_id,
                 model,
                 row.requests,
                 uncached_input,

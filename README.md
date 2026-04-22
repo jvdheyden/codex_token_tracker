@@ -192,10 +192,10 @@ Codex token tracker summary
 Input: /home/jvdh/.local/share/codex-token-tracker/codex-otel.jsonl
 Range: all
 
-Day         Model                Req       Input      Cached    Total In      Output   Reasoning      Est USD
-2026-04-21  gpt-5.4                3       85432      125000      210432       18420       12000       0.4963
-2026-04-21  gpt-5.4-mini           2       20110       30000       50110        6400        4100       0.0618
-TOTAL                              5      105542      155000      260542       24820       16100       0.5581
+Day         Conversation                          Model                Req       Input      Cached    Total In      Output   Reasoning      Est USD
+2026-04-21  019db1e4-eb34-7ca2-a3da-940c5a1648f6  gpt-5.4                3       85432      125000      210432       18420       12000       0.4963
+2026-04-21  019db1f2-58b6-77d2-9a7d-0d8efef2d624  gpt-5.4-mini           2       20110       30000       50110        6400        4100       0.0618
+TOTAL                                                                  5      105542      155000      260542       24820       16100       0.5581
 ```
 
 ## Pricing
@@ -206,6 +206,8 @@ file. Update it when OpenAI pricing changes.
 The text report uses `Input` for non-cached input, `Cached` for cached input,
 and `Total In` for the raw OTEL `input_token_count` value. This mirrors Codex's
 exit summary shape: `input=... (+ cached) output=...`.
+
+Rows are grouped by local day, Codex `conversation.id`, and model.
 
 The report skips `response.completed` records with `output_token_count = 0`.
 Codex emits these for internal warmup/no-op completions, and `/exit` does not
