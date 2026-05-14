@@ -104,7 +104,9 @@ The collector filters the raw Codex OTEL stream before writing JSONL:
 - drop traces, stream deltas, websocket deltas, and tool-call fragments
 
 That keeps the stored file focused on the final usage counters needed for cost
-estimation.
+estimation. The file exporter is configured with `append: true`; without that,
+the OpenTelemetry Collector truncates the JSONL whenever it opens the file after
+a restart.
 
 After changing `ops/otel/otel-codex.yaml`, recreate the collector:
 
@@ -112,9 +114,9 @@ After changing `ops/otel/otel-codex.yaml`, recreate the collector:
 bash ~/codex_token_tracker/scripts/ensure_otel_collector.sh --recreate
 ```
 
-If you want to discard old noisy telemetry after confirming the report works,
-archive or truncate the file, then recreate the collector so it opens the
-visible file rather than a deleted inode:
+If you intentionally want to discard old noisy telemetry after confirming the
+report works, archive first, truncate the file, then recreate the collector so
+it opens the visible file rather than a deleted inode:
 
 ```bash
 cp ~/.local/share/codex-token-tracker/codex-otel.jsonl \

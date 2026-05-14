@@ -21,6 +21,7 @@ exporters:
   file/codex:
     path: /data/codex-otel.jsonl
     format: json
+    append: true
 
 service:
   telemetry:
