@@ -191,39 +191,66 @@ python3 ~/codex_token_tracker/scripts/codex_cost_report.py summary --input /path
 
 ```text
 Codex token tracker summary
-Input: /home/jvdh/.local/share/codex-token-tracker/codex-otel.jsonl
+Input: /path/to/codex-otel.jsonl
 Range: all
+Pricing: Standard API rates (2026-10-03); context tier per request, including cached input
 
-Day         Conversation                          Model                Req       Input      Cached    Total In      Output   Reasoning      Est USD
-2026-04-21  019db1e4-eb34-7ca2-a3da-940c5a1648f6  gpt-5.4                3       85432      125000      210432       18420       12000       0.4963
-2026-04-21  019db1f2-58b6-77d2-9a7d-0d8efef2d624  gpt-5.4-mini           2       20110       30000       50110        6400        4100       0.0618
-TOTAL                                                                  5      105542      155000      260542       24820       16100       0.5581
+Day         Conversation                          Model              Context   Req       Input      Cached      Writes    Total In      Output   Reasoning      Est USD
+2026-10-03  example-conversation                  gpt-6-astra        <=272K      1       40000       60000       30000      100000        1000         500       0.5850
+2026-10-03  example-conversation                  gpt-6-astra        >272K       1      240000       60000       30000      300000        1000         500       5.1450
+TOTAL                                                                            2      280000      120000       60000      400000        2000        1000       5.7300
 ```
 
 ## Pricing
 
-The pricing table is in `scripts/codex_cost_report.py` near the top of the
-file. Update it when OpenAI pricing changes.
+The pricing table is in `scripts/codex_cost_report.py`, verified against
+[official OpenAI pricing](https://developers.openai.com/api/docs/pricing) on
+**2026-10-03**. These are Standard API rates in USD per million tokens:
+
+| Model | Input | Cached input | Cache writes | Output |
+| --- | ---: | ---: | ---: | ---: |
+| GPT-6 Astra | 10.00 | 1.00 | 12.50 | 50.00 |
+| GPT-6.1 Sol | 2.00 | 0.10 | 2.50 | 10.00 |
+| GPT-6 Sol | 2.00 | 0.20 | 2.50 | 10.00 |
+| GPT-6 Luna | 0.10 | 0.01 | 0.125 | 0.50 |
+| GPT-5.6 Sol | 4.00 | 0.40 | 5.00 | 20.00 |
+| GPT-5.6 Terra | 2.00 | 0.20 | 2.50 | 12.00 |
+| GPT-5.6 Luna | 0.20 | 0.02 | 0.25 | 1.20 |
+| GPT-5.5 | 5.00 | 0.50 | Same as input | 30.00 |
+| GPT-5.4 | 2.50 | 0.25 | Same as input | 15.00 |
+
+These rows show rates for requests with **at most 272,000 input tokens**.
+Above that threshold, the entire request uses **2x input/cache rates and
+1.5x output rates**. The script selects the tier from each event's total input,
+including cached reads and cache writes, before summing costs. It does not use
+cumulative conversation totals or add output tokens to the threshold.
+
+GPT-5.4 mini/nano, older Codex models, and the other existing entries retain
+their flat rates. Dated model snapshots use their base model's rates; unknown
+variants remain unpriced instead of inheriting a potentially incorrect rate.
+Update the table when prices change; historical logs are re-estimated using
+the current table, not the prices in effect on the event date.
 
 The text report uses `Input` for non-cached input, `Cached` for cached input,
-and `Total In` for the raw OTEL `input_token_count` value. This mirrors Codex's
-exit summary shape: `input=... (+ cached) output=...`.
+and `Total In` for the raw OTEL `input_token_count` value. `Writes` is a subset
+of `Input`, not an additional token count: `Input + Cached = Total In`.
+Cache-write tokens use their own rate when reported in telemetry, following
+[OpenAI's cache accounting](https://developers.openai.com/api/docs/guides/prompt-caching).
+Older logs without this field treat all non-cached input at the ordinary rate.
 
-Rows are grouped by local day, Codex `conversation.id`, and model.
+Rows are grouped by local day, Codex `conversation.id`, model, and context tier.
+`Context` is `<=272K` or `>272K` for tiered models, `all` for flat-rate models,
+and `unknown` for unpriced models. A conversation can have both short- and
+long-context rows, including when compaction reduces a later request's input.
+CSV preserves the existing columns and appends `context_tier` and
+`cache_write_tokens`.
 
 The report skips `response.completed` records with `output_token_count = 0`.
 Codex emits these for internal warmup/no-op completions, and `/exit` does not
 include them in its session token summary.
 
-Current defaults include standard text-token pricing for GPT-5.4, GPT-5.4 mini,
-GPT-5.4 nano, GPT-5.3-Codex, GPT-5.2-Codex, and related models. Reasoning tokens
-are reported separately when present, but cost is calculated from total output
-tokens because OpenAI bills reasoning tokens as output tokens.
-
-For very large GPT-5.4 sessions, OpenAI documents higher rates above the 272K
-input-token threshold. This script does not try to infer that full-session
-threshold policy from individual events; treat very large-session estimates as
-approximate.
+Reasoning tokens are reported separately when present, but cost is calculated
+from total output tokens, which already include reasoning.
 
 ## Limitations
 
@@ -234,3 +261,15 @@ approximate.
 - The collector file can grow over time. Rotate or archive
   `~/.local/share/codex-token-tracker/codex-otel.jsonl` manually if needed.
 - Web search tool-call fees and other non-token add-ons are not estimated.
+- Estimates use Standard rates even if requests used Fast/Priority, Ultrafast,
+  Batch, or Flex processing. Regional processing premiums are not included.
+- Internal models such as `codex-auto-review` have no rate in this table. Their
+  costs show `n/a`; the total cost includes only models with known pricing.
+
+## Tests
+
+Run the dependency-free pricing and report tests:
+
+```bash
+python3 -m unittest discover -s tests -v
+```

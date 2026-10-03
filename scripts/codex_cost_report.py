@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -21,9 +22,17 @@ DEFAULT_INPUT = (
 )
 
 # Standard text-token API prices in USD per 1M tokens.
-# Update this table when OpenAI pricing changes.
+# Verified 2026-10-03: https://developers.openai.com/api/docs/pricing
+# These are short-context rates; long-context multipliers are applied below.
 PRICING_USD_PER_1M_TOKENS: dict[str, dict[str, float]] = {
-    "gpt-5.5": {"input": 5.00, "cached_input": .5, "output": 30.00},
+    "gpt-6-astra": {"input": 10.00, "cached_input": 1.00, "cache_write": 12.50, "output": 50.00},
+    "gpt-6.1-sol": {"input": 2.00, "cached_input": 0.10, "cache_write": 2.50, "output": 10.00},
+    "gpt-6-sol": {"input": 2.00, "cached_input": 0.20, "cache_write": 2.50, "output": 10.00},
+    "gpt-6-luna": {"input": 0.10, "cached_input": 0.01, "cache_write": 0.125, "output": 0.50},
+    "gpt-5.6-sol": {"input": 4.00, "cached_input": 0.40, "cache_write": 5.00, "output": 20.00},
+    "gpt-5.6-terra": {"input": 2.00, "cached_input": 0.20, "cache_write": 2.50, "output": 12.00},
+    "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "cache_write": 0.25, "output": 1.20},
+    "gpt-5.5": {"input": 5.00, "cached_input": 0.50, "output": 30.00},
     "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
     "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
     "gpt-5.4-nano": {"input": 0.20, "cached_input": 0.02, "output": 1.25},
@@ -38,6 +47,14 @@ PRICING_USD_PER_1M_TOKENS: dict[str, dict[str, float]] = {
     "gpt-5": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
     "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.00},
 }
+
+# Only models with a documented long-context surcharge belong here. In
+# particular, GPT-5.4 mini/nano and the older Codex models retain flat rates.
+LONG_CONTEXT_THRESHOLD = 272_000
+LONG_CONTEXT_MODELS = frozenset({
+    "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna",
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4",
+})
 
 MODEL_KEYS = (
     "response.model",
@@ -65,6 +82,14 @@ CACHED_TOKEN_KEYS = (
     "cached_input_tokens",
     "cached_tokens",
 )
+CACHE_WRITE_TOKEN_KEYS = (
+    "cache_write_token_count",
+    "response.usage.input_tokens_details.cache_write_tokens",
+    "usage.input_tokens_details.cache_write_tokens",
+    "input_tokens_details.cache_write_tokens",
+    "prompt_tokens_details.cache_write_tokens",
+    "cache_write_tokens",
+)
 OUTPUT_TOKEN_KEYS = (
     "output_token_count",
     "response.usage.output_tokens",
@@ -81,7 +106,7 @@ REASONING_TOKEN_KEYS = (
     "completion_tokens_details.reasoning_tokens",
     "reasoning_tokens",
 )
-TOKEN_KEYS = INPUT_TOKEN_KEYS + CACHED_TOKEN_KEYS + OUTPUT_TOKEN_KEYS + REASONING_TOKEN_KEYS
+TOKEN_KEYS = INPUT_TOKEN_KEYS + CACHED_TOKEN_KEYS + CACHE_WRITE_TOKEN_KEYS + OUTPUT_TOKEN_KEYS + REASONING_TOKEN_KEYS
 CONVERSATION_KEYS = ("conversation.id", "conversation_id")
 NANO_TIME_KEYS = ("timeUnixNano", "observedTimeUnixNano", "time_unix_nano")
 MILLI_TIME_KEYS = ("timeUnixMilli", "timestamp_ms", "created_ms")
@@ -97,6 +122,7 @@ class UsageEvent:
     cached_input_tokens: int
     output_tokens: int
     reasoning_tokens: int
+    cache_write_tokens: int = 0
 
 
 @dataclass
@@ -108,6 +134,7 @@ class Summary:
     reasoning_tokens: int = 0
     estimated_usd: float = 0.0
     missing_price: bool = False
+    cache_write_tokens: int = 0
 
     def add(self, event: UsageEvent) -> None:
         self.requests += 1
@@ -115,7 +142,11 @@ class Summary:
         self.cached_input_tokens += event.cached_input_tokens
         self.output_tokens += event.output_tokens
         self.reasoning_tokens += event.reasoning_tokens
-        cost = estimate_cost(event.model, event.input_tokens, event.cached_input_tokens, event.output_tokens)
+        self.cache_write_tokens += event.cache_write_tokens
+        cost = estimate_cost(
+            event.model, event.input_tokens, event.cached_input_tokens,
+            event.output_tokens, event.cache_write_tokens,
+        )
         if cost is None:
             self.missing_price = True
         else:
@@ -386,6 +417,7 @@ def extract_usage(record: dict[str, Any], root: dict[str, Any]) -> UsageEvent:
         cached_input_tokens=as_int(first_value(flat, CACHED_TOKEN_KEYS)),
         output_tokens=as_int(first_value(flat, OUTPUT_TOKEN_KEYS)),
         reasoning_tokens=as_int(first_value(flat, REASONING_TOKEN_KEYS)),
+        cache_write_tokens=as_int(first_value(flat, CACHE_WRITE_TOKEN_KEYS)),
     )
 
 
@@ -409,58 +441,89 @@ def read_usage_events(path: Path) -> Iterable[UsageEvent]:
                     yield event
 
 
-def pricing_for_model(model: str) -> dict[str, float] | None:
+def pricing_model_key(model: str) -> str | None:
     normalized = model.lower().strip()
     if normalized in PRICING_USD_PER_1M_TOKENS:
-        return PRICING_USD_PER_1M_TOKENS[normalized]
-    for key in sorted(PRICING_USD_PER_1M_TOKENS, key=len, reverse=True):
-        if normalized.startswith(key + "-"):
-            return PRICING_USD_PER_1M_TOKENS[key]
+        return normalized
+    # Support dated snapshots, but never price an unknown variant (e.g. a Pro
+    # or Cyber model) as its cheaper parent merely because the prefix matches.
+    base = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", normalized)
+    if base in PRICING_USD_PER_1M_TOKENS:
+        return base
     return None
 
 
-def estimate_cost(model: str, input_tokens: int, cached_input_tokens: int, output_tokens: int) -> float | None:
-    pricing = pricing_for_model(model)
+def context_tier(model: str, input_tokens: int) -> str:
+    key = pricing_model_key(model)
+    if key is None:
+        return "unknown"
+    if key not in LONG_CONTEXT_MODELS:
+        return "all"
+    return ">272K" if input_tokens > LONG_CONTEXT_THRESHOLD else "<=272K"
+
+
+def pricing_for_model(model: str, input_tokens: int = 0) -> dict[str, float] | None:
+    key = pricing_model_key(model)
+    if key is None:
+        return None
+    pricing = PRICING_USD_PER_1M_TOKENS[key]
+    if key in LONG_CONTEXT_MODELS and input_tokens > LONG_CONTEXT_THRESHOLD:
+        # The entire request uses these rates, not just tokens above 272K.
+        # Both cached reads and cache writes receive the input multiplier.
+        return {kind: rate * (1.5 if kind == "output" else 2) for kind, rate in pricing.items()}
+    return pricing
+
+
+def estimate_cost(
+    model: str, input_tokens: int, cached_input_tokens: int, output_tokens: int,
+    cache_write_tokens: int = 0,
+) -> float | None:
+    pricing = pricing_for_model(model, input_tokens)
     if pricing is None:
         return None
     cached = min(cached_input_tokens, input_tokens)
     non_cached = max(0, input_tokens - cached)
+    writes = min(cache_write_tokens, non_cached)
     return (
-        non_cached * pricing["input"]
+        (non_cached - writes) * pricing["input"]
         + cached * pricing["cached_input"]
+        + writes * pricing.get("cache_write", pricing["input"])
         + output_tokens * pricing["output"]
     ) / 1_000_000
 
 
-def summarize(events: Iterable[UsageEvent], since: str | None, today: bool) -> dict[tuple[str, str, str], Summary]:
+def summarize(events: Iterable[UsageEvent], since: str | None, today: bool) -> dict[tuple[str, str, str, str], Summary]:
     since_date = datetime.now().astimezone().date().isoformat() if today else since
-    summaries: dict[tuple[str, str, str], Summary] = defaultdict(Summary)
+    summaries: dict[tuple[str, str, str, str], Summary] = defaultdict(Summary)
     for event in events:
         if since_date and (event.day == "unknown" or event.day < since_date):
             continue
-        summaries[(event.day, event.conversation_id, event.model)].add(event)
+        tier = context_tier(event.model, event.input_tokens)
+        summaries[(event.day, event.conversation_id, event.model, tier)].add(event)
     return summaries
 
 
-def print_text(path: Path, rows: dict[tuple[str, str, str], Summary], range_label: str) -> None:
+def print_text(path: Path, rows: dict[tuple[str, str, str, str], Summary], range_label: str) -> None:
     print("Codex token tracker summary")
     print(f"Input: {path}")
     print(f"Range: {range_label}")
+    print("Pricing: Standard API rates (2026-10-03); context tier per request, including cached input")
     print()
     if not rows:
         print("No response.completed events found.")
         return
 
     print(
-        f"{'Day':<10}  {'Conversation':<36}  {'Model':<18} {'Req':>5} {'Input':>11} {'Cached':>11} "
+        f"{'Day':<10}  {'Conversation':<36}  {'Model':<18} {'Context':<7} {'Req':>5} {'Input':>11} {'Cached':>11} {'Writes':>11} "
         f"{'Total In':>11} {'Output':>11} {'Reasoning':>11} {'Est USD':>12}"
     )
     total = Summary()
     missing_models: set[str] = set()
-    for (day, conversation_id, model), row in sorted(rows.items()):
+    for (day, conversation_id, model, tier), row in sorted(rows.items()):
         total.requests += row.requests
         total.input_tokens += row.input_tokens
         total.cached_input_tokens += row.cached_input_tokens
+        total.cache_write_tokens += row.cache_write_tokens
         total.output_tokens += row.output_tokens
         total.reasoning_tokens += row.reasoning_tokens
         total.estimated_usd += row.estimated_usd
@@ -469,15 +532,15 @@ def print_text(path: Path, rows: dict[tuple[str, str, str], Summary], range_labe
         cost_text = "n/a" if row.missing_price else f"{row.estimated_usd:.4f}"
         uncached_input = max(0, row.input_tokens - row.cached_input_tokens)
         print(
-            f"{day:<10}  {conversation_id:<36}  {model:<18.18} {row.requests:>5} {uncached_input:>11} "
-            f"{row.cached_input_tokens:>11} {row.input_tokens:>11} {row.output_tokens:>11} "
+            f"{day:<10}  {conversation_id:<36}  {model:<18.18} {tier:<7} {row.requests:>5} {uncached_input:>11} "
+            f"{row.cached_input_tokens:>11} {row.cache_write_tokens:>11} {row.input_tokens:>11} {row.output_tokens:>11} "
             f"{row.reasoning_tokens:>11} {cost_text:>12}"
         )
     total_cost_text = "n/a" if missing_models and total.estimated_usd == 0 else f"{total.estimated_usd:.4f}"
     total_uncached_input = max(0, total.input_tokens - total.cached_input_tokens)
     print(
-        f"{'TOTAL':<10}  {'':<36}  {'':<18} {total.requests:>5} {total_uncached_input:>11} "
-        f"{total.cached_input_tokens:>11} {total.input_tokens:>11} {total.output_tokens:>11} "
+        f"{'TOTAL':<10}  {'':<36}  {'':<18} {'':<7} {total.requests:>5} {total_uncached_input:>11} "
+        f"{total.cached_input_tokens:>11} {total.cache_write_tokens:>11} {total.input_tokens:>11} {total.output_tokens:>11} "
         f"{total.reasoning_tokens:>11} {total_cost_text:>12}"
     )
     if missing_models:
@@ -485,7 +548,7 @@ def print_text(path: Path, rows: dict[tuple[str, str, str], Summary], range_labe
         print("Missing pricing for: " + ", ".join(sorted(missing_models)))
 
 
-def print_csv(rows: dict[tuple[str, str, str], Summary]) -> None:
+def print_csv(rows: dict[tuple[str, str, str, str], Summary]) -> None:
     writer = csv.writer(sys.stdout)
     writer.writerow(
         [
@@ -500,9 +563,11 @@ def print_csv(rows: dict[tuple[str, str, str], Summary]) -> None:
             "reasoning_tokens",
             "estimated_usd",
             "pricing_status",
+            "context_tier",
+            "cache_write_tokens",
         ]
     )
-    for (day, conversation_id, model), row in sorted(rows.items()):
+    for (day, conversation_id, model, tier), row in sorted(rows.items()):
         uncached_input = max(0, row.input_tokens - row.cached_input_tokens)
         writer.writerow(
             [
@@ -517,6 +582,8 @@ def print_csv(rows: dict[tuple[str, str, str], Summary]) -> None:
                 row.reasoning_tokens,
                 "" if row.missing_price else f"{row.estimated_usd:.6f}",
                 "missing" if row.missing_price else "priced",
+                tier,
+                row.cache_write_tokens,
             ]
         )
 
