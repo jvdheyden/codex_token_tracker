@@ -51,7 +51,7 @@ Create or merge this into `~/.codex/hooks.json`:
           {
             "type": "command",
             "command": "bash -lc 'exec \"$HOME/codex_token_tracker/scripts/ensure_otel_collector.sh\"'",
-            "timeout": 10
+            "timeout": 120
           }
         ]
       }
@@ -62,6 +62,15 @@ Create or merge this into `~/.codex/hooks.json`:
 
 The hook starts the collector when Codex starts or resumes. It is safe to run
 repeatedly and does not emit stdout on success.
+
+On macOS, the helper also launches Docker Desktop when its local engine is
+stopped, waits up to 90 seconds for it to become ready, then ensures the
+collector is running. Keep the hook timeout at least 120 seconds to allow a
+cold Docker startup. When Docker is already running, the helper proceeds
+immediately. After changing an existing hook definition, check its status in
+Codex's `/hooks` menu or the desktop app's Settings > Hooks. If Codex marks it
+as needing review, review and trust it; if it is already trusted, no action is
+needed.
 
 ## Start And Stop
 
@@ -125,9 +134,14 @@ cp ~/.local/share/codex-token-tracker/codex-otel.jsonl \
 bash ~/codex_token_tracker/scripts/ensure_otel_collector.sh --recreate
 ```
 
-If Docker is missing or not running, the startup script exits successfully with
-a warning so Codex startup is not blocked. In that case no telemetry is
-collected until Docker is available and the collector is running.
+If Docker is missing, inaccessible, or fails to start within the timeout, the
+startup script exits successfully with a warning so Codex can continue. In that
+case no telemetry is collected until Docker is available and the collector is
+running. Automatic Docker startup is limited to Docker Desktop's local macOS
+socket; remote contexts and other runtimes are left alone. Set
+`CODEX_TOKEN_TRACKER_START_DOCKER=0` to disable automatic Docker startup, or
+`CODEX_TOKEN_TRACKER_DOCKER_START_TIMEOUT` to change the 90-second wait (and keep
+the hook timeout longer than that wait).
 
 The hook uses plain `docker`, not `sudo docker`. Check this before relying on
 the hook:
@@ -268,7 +282,7 @@ from total output tokens, which already include reasoning.
 
 ## Tests
 
-Run the dependency-free pricing and report tests:
+Run the dependency-free pricing, report, and collector startup tests:
 
 ```bash
 python3 -m unittest discover -s tests -v

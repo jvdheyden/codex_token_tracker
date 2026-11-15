@@ -45,19 +45,54 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 0
 fi
 
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  warn "collector config not found: $CONFIG_FILE"
+  exit 0
+fi
+
 if ! docker_info_error="$(docker info 2>&1 >/dev/null)"; then
   if printf '%s' "$docker_info_error" | grep -qiE 'permission denied|access denied|not authorized|unauthorized'; then
     warn "docker is installed but not accessible without sudo; collector not started"
     warn "make plain 'docker info' work for this user because Codex hooks cannot answer sudo prompts"
-  else
-    warn "docker is not running or not reachable; collector not started"
+    exit 0
   fi
-  exit 0
-fi
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
-  warn "collector config not found: $CONFIG_FILE"
-  exit 0
+  # Only launch Docker Desktop for its local macOS socket. A failed remote
+  # context (or another container runtime) must not start an unrelated daemon.
+  docker_endpoint="${DOCKER_HOST:-}"
+  if [[ -z "$docker_endpoint" || -n "${DOCKER_CONTEXT:-}" ]]; then
+    docker_endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+  fi
+  start_desktop=0
+  if [[ "$(uname -s)" == Darwin && "${CODEX_TOKEN_TRACKER_START_DOCKER:-1}" == 1 ]]; then
+    case "$docker_endpoint" in
+      unix://*/.docker/run/docker.sock|unix:///var/run/docker.sock)
+        start_desktop=1
+        ;;
+    esac
+  fi
+  if [[ "$start_desktop" != 1 ]]; then
+    warn "docker is not running or not reachable; collector not started"
+    exit 0
+  fi
+
+  start_timeout="${CODEX_TOKEN_TRACKER_DOCKER_START_TIMEOUT:-90}"
+  if [[ ! "$start_timeout" =~ ^[1-9][0-9]*$ ]]; then
+    warn "CODEX_TOKEN_TRACKER_DOCKER_START_TIMEOUT must be a positive number of seconds"
+    exit 0
+  fi
+  if ! open -g -a Docker >/dev/null 2>&1; then
+    warn "could not launch Docker Desktop; collector not started"
+    exit 0
+  fi
+  deadline=$((SECONDS + start_timeout))
+  until docker info >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      warn "Docker Desktop did not become ready within ${start_timeout}s; collector not started"
+      exit 0
+    fi
+    sleep 1
+  done
 fi
 
 state="$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)"
