@@ -10,6 +10,17 @@ from scripts import codex_cost_report as report
 
 
 class PricingTests(unittest.TestCase):
+    def test_gpt_6_2_and_6_1_terra_costs_in_both_context_tiers(self):
+        cases = (
+            ("gpt-6.2-astra", 0.796, 1.572016),
+            ("gpt-6.2-sol", 0.199, 0.393004),
+            ("gpt-6.1-terra", 0.0995, 0.196502),
+        )
+        for model, short_cost, long_cost in cases:
+            with self.subTest(model=model):
+                self.assertAlmostEqual(report.estimate_cost(model, 272_000, 200_000, 1_000, 50_000), short_cost)
+                self.assertAlmostEqual(report.estimate_cost(model, 272_001, 200_000, 1_000, 50_000), long_cost)
+
     def test_threshold_is_strict_and_prices_the_whole_request(self):
         for tokens, expected in [(271_999, 2.72049), (272_000, 2.7205), (272_001, 5.44077)]:
             with self.subTest(tokens=tokens):

@@ -207,7 +207,7 @@ python3 ~/codex_token_tracker/scripts/codex_cost_report.py summary --input /path
 Codex token tracker summary
 Input: /path/to/codex-otel.jsonl
 Range: all
-Pricing: Standard API rates (2026-10-03); context tier per request, including cached input
+Pricing: Standard API rates (2026-11-18); context tier per request, including cached input
 
 Day         Conversation                          Model              Context   Req       Input      Cached      Writes    Total In      Output   Reasoning      Est USD
 2026-10-03  example-conversation                  gpt-6-astra        <=272K      1       40000       60000       30000      100000        1000         500       0.5850
@@ -217,14 +217,17 @@ TOTAL                                                                           
 
 ## Pricing
 
-The pricing table is in `scripts/codex_cost_report.py`, verified against
-[official OpenAI pricing](https://developers.openai.com/api/docs/pricing) on
-**2026-10-03**. These are Standard API rates in USD per million tokens:
+The table in `scripts/codex_cost_report.py` uses Standard API rates in USD per
+million tokens, verified on **2026-11-18**.
+[Official OpenAI pricing](https://developers.openai.com/api/docs/pricing)
 
 | Model | Input | Cached input | Cache writes | Output |
 | --- | ---: | ---: | ---: | ---: |
+| GPT-6.2 Astra | 8.00 | 0.40 | 10.00 | 40.00 |
+| GPT-6.2 Sol | 2.00 | 0.10 | 2.50 | 10.00 |
 | GPT-6 Astra | 10.00 | 1.00 | 12.50 | 50.00 |
 | GPT-6.1 Sol | 2.00 | 0.10 | 2.50 | 10.00 |
+| GPT-6.1 Terra | 1.00 | 0.05 | 1.25 | 5.00 |
 | GPT-6 Sol | 2.00 | 0.20 | 2.50 | 10.00 |
 | GPT-6 Luna | 0.10 | 0.01 | 0.125 | 0.50 |
 | GPT-5.6 Sol | 4.00 | 0.40 | 5.00 | 20.00 |
@@ -239,6 +242,9 @@ Above that threshold, the entire request uses **2x input/cache rates and
 including cached reads and cache writes, before summing costs. It does not use
 cumulative conversation totals or add output tokens to the threshold.
 
+The listed GPT-5.6 Sol rates are promotional through November 30, 2026.
+[GPT-5.6 Sol pricing](https://developers.openai.com/api/docs/models/gpt-5.6-sol#pricing)
+
 GPT-5.4 mini/nano, older Codex models, and the other existing entries retain
 their flat rates. Dated model snapshots use their base model's rates; unknown
 variants remain unpriced instead of inheriting a potentially incorrect rate.
@@ -248,9 +254,10 @@ the current table, not the prices in effect on the event date.
 The text report uses `Input` for non-cached input, `Cached` for cached input,
 and `Total In` for the raw OTEL `input_token_count` value. `Writes` is a subset
 of `Input`, not an additional token count: `Input + Cached = Total In`.
-Cache-write tokens use their own rate when reported in telemetry, following
-[OpenAI's cache accounting](https://developers.openai.com/api/docs/guides/prompt-caching).
+When telemetry reports cache-write tokens, the estimate uses the default
+30-minute write rate where applicable.
 Older logs without this field treat all non-cached input at the ordinary rate.
+[OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
 
 Rows are grouped by local day, Codex `conversation.id`, model, and context tier.
 `Context` is `<=272K` or `>272K` for tiered models, `all` for flat-rate models,

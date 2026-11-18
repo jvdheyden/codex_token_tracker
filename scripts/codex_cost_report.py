@@ -21,12 +21,16 @@ DEFAULT_INPUT = (
     / "codex-otel.jsonl"
 )
 
-# Standard text-token API prices in USD per 1M tokens.
-# Verified 2026-10-03: https://developers.openai.com/api/docs/pricing
-# These are short-context rates; long-context multipliers are applied below.
+# Verified against https://developers.openai.com/api/docs/pricing
+PRICING_VERIFIED_ON = "2026-11-18"
+
+# Standard short-context API prices in USD per 1M tokens, with 30-minute cache writes.
 PRICING_USD_PER_1M_TOKENS: dict[str, dict[str, float]] = {
+    "gpt-6.2-astra": {"input": 8.00, "cached_input": 0.40, "cache_write": 10.00, "output": 40.00},
+    "gpt-6.2-sol": {"input": 2.00, "cached_input": 0.10, "cache_write": 2.50, "output": 10.00},
     "gpt-6-astra": {"input": 10.00, "cached_input": 1.00, "cache_write": 12.50, "output": 50.00},
     "gpt-6.1-sol": {"input": 2.00, "cached_input": 0.10, "cache_write": 2.50, "output": 10.00},
+    "gpt-6.1-terra": {"input": 1.00, "cached_input": 0.05, "cache_write": 1.25, "output": 5.00},
     "gpt-6-sol": {"input": 2.00, "cached_input": 0.20, "cache_write": 2.50, "output": 10.00},
     "gpt-6-luna": {"input": 0.10, "cached_input": 0.01, "cache_write": 0.125, "output": 0.50},
     "gpt-5.6-sol": {"input": 4.00, "cached_input": 0.40, "cache_write": 5.00, "output": 20.00},
@@ -52,7 +56,7 @@ PRICING_USD_PER_1M_TOKENS: dict[str, dict[str, float]] = {
 # particular, GPT-5.4 mini/nano and the older Codex models retain flat rates.
 LONG_CONTEXT_THRESHOLD = 272_000
 LONG_CONTEXT_MODELS = frozenset({
-    "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna",
+    "gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna",
     "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4",
 })
 
@@ -507,7 +511,7 @@ def print_text(path: Path, rows: dict[tuple[str, str, str, str], Summary], range
     print("Codex token tracker summary")
     print(f"Input: {path}")
     print(f"Range: {range_label}")
-    print("Pricing: Standard API rates (2026-10-03); context tier per request, including cached input")
+    print(f"Pricing: Standard API rates ({PRICING_VERIFIED_ON}); context tier per request, including cached input")
     print()
     if not rows:
         print("No response.completed events found.")
